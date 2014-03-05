@@ -15,63 +15,53 @@
 
 #include <cuda_runtime_api.h>
 
-double gettime()
-{
-    struct timeval tv;
-
-    int rc = gettimeofday(&tv, NULL);
-    assert(rc == 0);
-
-    return tv.tv_sec + tv.tv_usec / 1000000.0;
-}
-
 using namespace std;
 
 template <typename T>
-__device__ __host__ inline T Ch(const T x, const T & y, const T & z)
+__device__ inline T Ch(const T x, const T & y, const T & z)
 {
     return (x & y) ^ (~x & z);
 }
 
 template <typename T>
-__device__ __host__ inline T Maj(const T & x, const T & y, const T & z)
+__device__ inline T Maj(const T & x, const T & y, const T & z)
 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
 template <int n, typename T>
-__device__ __host__ inline T ROTR(const T & x)
+__device__ inline T ROTR(const T & x)
 {
     return (x >> n) | (x << (8 * sizeof(T) - n));
 }
 
 template <int n, typename T>
-__device__ __host__ inline T SHR(const T & x)
+__device__ inline T SHR(const T & x)
 {
     return (x >> n);
 }
 
-__device__ __host__ inline uint64_t Sigma_0(const uint64_t & x)
+__device__ inline uint64_t Sigma_0(const uint64_t & x)
 {
     return ROTR<28>(x) ^ ROTR<34>(x) ^ ROTR<39>(x);
 }
 
-__device__ __host__ inline uint64_t Sigma_1(const uint64_t & x)
+__device__ inline uint64_t Sigma_1(const uint64_t & x)
 {
     return ROTR<14>(x) ^ ROTR<18>(x) ^ ROTR<41>(x);
 }
 
-__device__ __host__ inline uint64_t sigma_0(const uint64_t & x)
+__device__ inline uint64_t sigma_0(const uint64_t & x)
 {
     return ROTR<1>(x) ^ ROTR<8>(x) ^ SHR<7>(x);
 }
 
-__device__ __host__ inline uint64_t sigma_1(const uint64_t & x)
+__device__ inline uint64_t sigma_1(const uint64_t & x)
 {
     return ROTR<19>(x) ^ ROTR<61>(x) ^ SHR<6>(x);
 }
 
-__device__ __host__ inline void sha512_init(uint64_t H[8])
+__device__ inline void sha512_init(uint64_t H[8])
 {
     const uint64_t initial_values[8] =
     {
@@ -91,7 +81,7 @@ __device__ __host__ inline void sha512_init(uint64_t H[8])
     }
 }
 
-__device__ __host__ inline void sha512_update(const uint64_t M[16], uint64_t H[8])
+__device__ inline void sha512_update(const uint64_t M[16], uint64_t H[8])
 {
     const uint64_t K[80] =
     {
@@ -198,10 +188,10 @@ __global__ void sha512_challenge_kernel(const char * prefix, const uint64_t offs
 
     uint8_t * M_bytes = reinterpret_cast<uint8_t *>(M);
 
+    int j = 7;
+
     for (int i = 0; ; ++i)
     {
-        const int j = (i / 8) * 16 + 7 - i;
-
         uint8_t c = message[i];
 
         if (c == '\0')
@@ -211,6 +201,9 @@ __global__ void sha512_challenge_kernel(const char * prefix, const uint64_t offs
         }
 
         M_bytes[j] = c;
+
+        if (j % 8 == 0) j += 16;
+        --j;
     }
 
      // Add message length (in bits)
@@ -235,14 +228,24 @@ __global__ void sha512_challenge_kernel(const char * prefix, const uint64_t offs
     }
 }
 
-volatile bool quit = false;
+static volatile bool quit_flag = false;
 
-void signal_handler(int)
+static double gettime()
 {
-    quit = true;
+    struct timeval tv;
+
+    int rc = gettimeofday(&tv, NULL);
+    assert(rc == 0);
+
+    return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
 
-void usage()
+static void signal_handler(int)
+{
+    quit_flag = true;
+}
+
+static void usage()
 {
     cout << "Usage: sha512-challenge [-p <prefix>] [-o <offset>] [-t <threshold-bits>]" << endl;
 }
@@ -255,7 +258,13 @@ int main(int argc, char ** argv)
     uint64_t offset = 0;
     unsigned threshold_bits = 32;
 
-    for (int i = 1; i < argc; ++i)
+    enum {
+        STATUS_OK,
+        STATUS_SHOW_USAGE,
+        STATUS_ERROR
+    } status = STATUS_OK;
+
+    for (int i = 1; status == STATUS_OK && i < argc; ++i)
     {
         if (strcmp(argv[i], "--prefix") == 0 || strcmp(argv[i], "-p") == 0)
         {
@@ -264,6 +273,7 @@ int main(int argc, char ** argv)
             if (i == argc)
             {
                 // we expected a string to follow.
+                status = STATUS_ERROR;
             }
             else
             {
@@ -277,11 +287,16 @@ int main(int argc, char ** argv)
             if (i == argc)
             {
                 // we expected an integer to follow.
+                status = STATUS_ERROR;
             }
             else
             {
                 istringstream is(argv[i]);
                 is >> offset;
+                if (!is)
+                {
+                    status = STATUS_ERROR;
+                }
             }
         }
         else if (strcmp(argv[i], "--threshold-bits") == 0 || strcmp(argv[i], "-t") == 0)
@@ -291,22 +306,33 @@ int main(int argc, char ** argv)
             if (i == argc)
             {
                 // we expected an integer to follow.
+                status = STATUS_ERROR;
             }
             else
             {
                 istringstream is(argv[i]);
                 is >> threshold_bits;
+                if (!is)
+                {
+                    status = STATUS_ERROR;
+                }
             }
         }
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
         {
-            usage();
-            return EXIT_SUCCESS;
+            status = STATUS_ERROR;
         }
         else
         {
             // Unknown command line parameter.
+            status = STATUS_ERROR;
         }
+    }
+
+    if (status != STATUS_OK)
+    {
+        usage();
+        return (status == STATUS_SHOW_USAGE) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
     const uint64_t threshold = (-1ULL) >> threshold_bits;
@@ -315,7 +341,7 @@ int main(int argc, char ** argv)
 
     // Copy prefix to device
 
-    unsigned prefix_size = strlen(prefix);
+    const unsigned prefix_size = strlen(prefix);
 
     char * prefix_dev;
 
@@ -329,13 +355,16 @@ int main(int argc, char ** argv)
     cudaErr = cudaMemcpy(prefix_dev, prefix, prefix_size + 1, cudaMemcpyHostToDevice);
     assert(cudaErr == cudaSuccess);
 
-    // Execute kernel (blocks, threads-per-block)
+    sighandler_t sig = signal(SIGINT, signal_handler);
+    assert(sig != SIG_ERR);
 
-    signal(SIGINT, signal_handler);
+    // Infinite loop
 
-    while (!quit)
+    while (!quit_flag)
     {
         const double t1 = gettime();
+
+        // Execute kernel (blocks, threads-per-block)
 
         sha512_challenge_kernel<<<390625, 256>>>(prefix_dev, offset, threshold);
         cudaErr = cudaGetLastError();
@@ -348,7 +377,7 @@ int main(int argc, char ** argv)
 
         const double duration = t2 - t1;
 
-        cout << "# offset: " << offset << " performance: " << (1 * (390625 * 256) / 1e6 / duration) << " MHash/s" << endl;
+        cout << "# offset: " << offset << " performance: " << ((390625 * 256) / 1e6 / duration) << " MHash/s" << endl;
 
         offset += 390625 * 256;
     }
