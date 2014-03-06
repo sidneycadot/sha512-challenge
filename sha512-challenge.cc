@@ -229,8 +229,6 @@ __global__ void sha512_challenge_kernel(const char * prefix, const uint64_t offs
     }
 }
 
-static volatile bool quit_flag = false;
-
 static double gettime()
 {
     struct timeval tv;
@@ -240,6 +238,8 @@ static double gettime()
 
     return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
+
+static volatile bool quit_flag = false;
 
 static void signal_handler(int)
 {
@@ -364,6 +364,8 @@ int main(int argc, char ** argv)
         return (status == STATUS_SHOW_USAGE) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
+    // Command line parameters parsed. Prepare GPU runs ...
+
     const uint64_t threshold = (-1ULL) >> threshold_bits;
 
     cout << "# prefix: \"" << prefix << "\" offset: " << offset << " threshold: 0x" << hex << setfill('0') << setw(16) << threshold << setfill(' ') << dec << endl;
@@ -396,7 +398,6 @@ int main(int argc, char ** argv)
 
     while (!quit_flag)
     {
-
         const double t1 = gettime();
 
         // Execute kernel (blocks, threads-per-block)
@@ -429,12 +430,12 @@ int main(int argc, char ** argv)
         offset += numberOfHashesPerKernelInvocation; // 10 million
     }
 
-    cout << "# bye!" << endl;
-
     // Free memory
 
     cudaErr = cudaFree(prefix_dev);
     assert(cudaErr == cudaSuccess);
+
+    cout << "# bye!" << endl;
 
     return EXIT_SUCCESS;
 }
