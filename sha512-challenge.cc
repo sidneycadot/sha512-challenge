@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include <csignal>
 #include <cstdlib>
+#include <unistd.h>
 
 #include <cuda_runtime_api.h>
 
@@ -151,7 +152,7 @@ __device__ inline void sha512_update(const uint64_t M[16], uint64_t H[8])
 
 __global__ void sha512_challenge_kernel(const char * prefix, const uint64_t offset, const uint64_t threshold)
 {
-    const uint64_t whoami = offset + blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t whoami = offset + (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
 
     // Prepare message
 
@@ -247,7 +248,15 @@ static void signal_handler(int)
 
 static void usage()
 {
-    cout << "Usage: sha512-challenge [-p <prefix>] [-o <offset>] [-t <threshold-bits>]" << endl;
+    cout << endl;
+    cout << "Usage: sha512-challenge [-p <prefix>] [-o <offset>] [-t <threshold-bits>] [-s <sleep-ms>]" << endl;
+    cout << endl;
+    cout << " -h --help              Display this help message." << endl;
+    cout << " -p --prefix            Prefix of string." << endl;
+    cout << " -o --offset            Start offset of 64-bit hexadecimal suffix" << endl;
+    cout << " -t --threshold-bits    Number of SHA-512 starting bits that have to be zero to report a solution." << endl;
+    cout << " -s --sleep             Number of milliseconds to sleep between kernel invocations (0 = no sleep)." << endl;
+    cout << endl;
 }
 
 int main(int argc, char ** argv)
@@ -257,6 +266,7 @@ int main(int argc, char ** argv)
     char *   prefix = "";
     uint64_t offset = 0;
     unsigned threshold_bits = 32;
+    unsigned sleep_between_kernel_runs = 0;
 
     enum {
         STATUS_OK,
@@ -318,6 +328,25 @@ int main(int argc, char ** argv)
                 }
             }
         }
+        else if (strcmp(argv[i], "--sleep") == 0 || strcmp(argv[i], "-s") == 0)
+        {
+            ++i;
+
+            if (i == argc)
+            {
+                // we expected an integer to follow.
+                status = STATUS_ERROR;
+            }
+            else
+            {
+                istringstream is(argv[i]);
+                is >> sleep_between_kernel_runs;
+                if (!is)
+                {
+                    status = STATUS_ERROR;
+                }
+            }
+        }
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
         {
             status = STATUS_ERROR;
@@ -360,14 +389,24 @@ int main(int argc, char ** argv)
 
     // Infinite loop
 
+    const dim3 gridDim(625, 625); // grid of blocks
+    const dim3 blockDim(256); // threads in a single block
+
+    const unsigned numberOfHashesPerKernelInvocation = gridDim.x * gridDim.y * gridDim.z * blockDim.x * blockDim.y * blockDim.z;
+
     while (!quit_flag)
     {
+
         const double t1 = gettime();
 
         // Execute kernel (blocks, threads-per-block)
 
-        sha512_challenge_kernel<<<390625, 256>>>(prefix_dev, offset, threshold);
+        sha512_challenge_kernel<<<gridDim, blockDim>>>(prefix_dev, offset, threshold);
         cudaErr = cudaGetLastError();
+        if (cudaErr != cudaSuccess)
+        {
+            cout << "# kernel execution error " << cudaErr << ": " << cudaGetErrorString(cudaErr) << endl;
+        }
         assert(cudaErr == cudaSuccess);
 
         cudaErr = cudaDeviceSynchronize();
@@ -377,9 +416,17 @@ int main(int argc, char ** argv)
 
         const double duration = t2 - t1;
 
-        cout << "# offset: " << offset << " performance: " << ((390625 * 256) / 1e6 / duration) << " MHash/s" << endl;
+        cout << "# offset: [" << offset << "..." << (offset + numberOfHashesPerKernelInvocation - 1) << "] performance: " << (numberOfHashesPerKernelInvocation / 1e6 / duration) << " MHash/s" << endl;
 
-        offset += 390625 * 256;
+        if (sleep_between_kernel_runs > 0)
+        {
+            // On some (older, slower) cards, this is necessary to ensure that the
+            // output is displayed.
+
+            usleep(1000 * sleep_between_kernel_runs);
+        }
+
+        offset += numberOfHashesPerKernelInvocation; // 10 million
     }
 
     cout << "# bye!" << endl;
