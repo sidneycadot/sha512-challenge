@@ -260,7 +260,7 @@ static void usage()
         " -t --threshold-bits    Number of SHA-512 starting bits that have to be zero to report a solution."  "\n"
         " -s --sleep             Number of milliseconds to sleep between kernel invocations (0 = no sleep)."  "\n"
 
-        << flush;
+        << endl;
 }
 
 int main(int argc, char ** argv)
