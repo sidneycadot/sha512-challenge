@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include <csignal>
 #include <cstdlib>
+#include <unistd.h>
 
 #include <cuda_runtime_api.h>
 
@@ -63,9 +64,11 @@ __device__ inline uint64_t sigma_1(const uint64_t & x)
 
 __device__ inline void sha512_init(uint64_t H[8])
 {
+     // the first 64 bits of the fractional parts of the square roots of the first eight prime numbers.
+
     const uint64_t initial_values[8] =
     {
-        0x6a09e667f3bcc908, // the first 64 bits of the fractional parts of the square roots of the first eight prime numbers.
+        0x6a09e667f3bcc908,
         0xbb67ae8584caa73b,
         0x3c6ef372fe94f82b,
         0xa54ff53a5f1d36f1,
@@ -85,6 +88,8 @@ __device__ inline void sha512_update(const uint64_t M[16], uint64_t H[8])
 {
     const uint64_t K[80] =
     {
+        // the first 64 bits of the fractional parts of the cube roots of the first eighty prime numbers.
+
         0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
         0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
         0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
@@ -122,12 +127,8 @@ __device__ inline void sha512_update(const uint64_t M[16], uint64_t H[8])
     {
         W[t] = (t < 16) ? M[t] : (sigma_1(W[t - 2]) + W[t - 7] + sigma_0(W[t - 15]) + W[t - 16]);
 
-        //W[t % 16] = (t < 16) ? M[t] : (sigma_1(W[(t - 2) % 16]) + W[(t - 7) % 16] + sigma_0(W[(t - 15) % 16]) + W[(t - 16) % 16]);
-
         const uint64_t T_1 = h + Sigma_1(e) + Ch(e, f, g) + K[t] + W[t];
         const uint64_t T_2 =     Sigma_0(a) + Maj(a, b, c);
-
-        // Update a ... h
 
         h = g;
         g = f;
@@ -151,7 +152,9 @@ __device__ inline void sha512_update(const uint64_t M[16], uint64_t H[8])
 
 __global__ void sha512_challenge_kernel(const char * prefix, const uint64_t offset, const uint64_t threshold)
 {
-    const uint64_t whoami = offset + blockIdx.x * blockDim.x + threadIdx.x;
+    // The "whoami" number is used as a suffix that determines the string to be hashed.
+
+    const uint64_t whoami = offset + (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
 
     // Prepare message
 
@@ -228,8 +231,6 @@ __global__ void sha512_challenge_kernel(const char * prefix, const uint64_t offs
     }
 }
 
-static volatile bool quit_flag = false;
-
 static double gettime()
 {
     struct timeval tv;
@@ -240,6 +241,8 @@ static double gettime()
     return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
 
+static volatile bool quit_flag = false;
+
 static void signal_handler(int)
 {
     quit_flag = true;
@@ -247,7 +250,17 @@ static void signal_handler(int)
 
 static void usage()
 {
-    cout << "Usage: sha512-challenge [-p <prefix>] [-o <offset>] [-t <threshold-bits>]" << endl;
+    cout <<
+                                                                                                              "\n"
+        "Usage: sha512-challenge [-p <prefix>] [-o <offset>] [-t <threshold-bits>] [-s <sleep-ms>]"           "\n"
+                                                                                                              "\n"
+        " -h --help              Display this help message."                                                  "\n"
+        " -p --prefix            Prefix of string."                                                           "\n"
+        " -o --offset            Start offset of 64-bit hexadecimal suffix"                                   "\n"
+        " -t --threshold-bits    Number of SHA-512 starting bits that have to be zero to report a solution."  "\n"
+        " -s --sleep             Number of milliseconds to sleep between kernel invocations (0 = no sleep)."  "\n"
+
+        << endl;
 }
 
 int main(int argc, char ** argv)
@@ -257,6 +270,7 @@ int main(int argc, char ** argv)
     char *   prefix = "";
     uint64_t offset = 0;
     unsigned threshold_bits = 32;
+    unsigned sleep_between_kernel_runs = 0;
 
     enum {
         STATUS_OK,
@@ -312,6 +326,25 @@ int main(int argc, char ** argv)
             {
                 istringstream is(argv[i]);
                 is >> threshold_bits;
+                if (!is || threshold_bits > 64)
+                {
+                    status = STATUS_ERROR;
+                }
+            }
+        }
+        else if (strcmp(argv[i], "--sleep") == 0 || strcmp(argv[i], "-s") == 0)
+        {
+            ++i;
+
+            if (i == argc)
+            {
+                // we expected an integer to follow.
+                status = STATUS_ERROR;
+            }
+            else
+            {
+                istringstream is(argv[i]);
+                is >> sleep_between_kernel_runs;
                 if (!is)
                 {
                     status = STATUS_ERROR;
@@ -320,7 +353,7 @@ int main(int argc, char ** argv)
         }
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
         {
-            status = STATUS_ERROR;
+            status = STATUS_SHOW_USAGE;
         }
         else
         {
@@ -335,11 +368,13 @@ int main(int argc, char ** argv)
         return (status == STATUS_SHOW_USAGE) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
+    // Command line parameters successfully parsed. Prepare GPU runs ...
+
     const uint64_t threshold = (-1ULL) >> threshold_bits;
 
     cout << "# prefix: \"" << prefix << "\" offset: " << offset << " threshold: 0x" << hex << setfill('0') << setw(16) << threshold << setfill(' ') << dec << endl;
 
-    // Copy prefix to device
+    // Copy prefix to device (including the terminating NUL character).
 
     const unsigned prefix_size = strlen(prefix);
 
@@ -355,19 +390,32 @@ int main(int argc, char ** argv)
     cudaErr = cudaMemcpy(prefix_dev, prefix, prefix_size + 1, cudaMemcpyHostToDevice);
     assert(cudaErr == cudaSuccess);
 
+    // Install signal handler to process CTRL-C gracefully.
+
     sighandler_t sig = signal(SIGINT, signal_handler);
     assert(sig != SIG_ERR);
 
-    // Infinite loop
+    // Mining loop.
+    // Each kernel invocation tries 10 million strings.
 
+    const dim3 gridDim(625, 625); // grid of blocks
+    const dim3 blockDim(256);     // threads in a single block
+
+    const unsigned numberOfHashesPerKernelInvocation = gridDim.x * gridDim.y * gridDim.z * blockDim.x * blockDim.y * blockDim.z;
+
+    cout << fixed << setprecision(3);
     while (!quit_flag)
     {
         const double t1 = gettime();
 
         // Execute kernel (blocks, threads-per-block)
 
-        sha512_challenge_kernel<<<390625, 256>>>(prefix_dev, offset, threshold);
+        sha512_challenge_kernel<<<gridDim, blockDim>>>(prefix_dev, offset, threshold);
         cudaErr = cudaGetLastError();
+        if (cudaErr != cudaSuccess)
+        {
+            cout << "# kernel execution error " << cudaErr << ": " << cudaGetErrorString(cudaErr) << endl;
+        }
         assert(cudaErr == cudaSuccess);
 
         cudaErr = cudaDeviceSynchronize();
@@ -377,17 +425,24 @@ int main(int argc, char ** argv)
 
         const double duration = t2 - t1;
 
-        cout << "# offset: " << offset << " performance: " << ((390625 * 256) / 1e6 / duration) << " MHash/s" << endl;
+        cout << "# performance: " << (numberOfHashesPerKernelInvocation / 1e6 / duration) << " MHash/s ; offsets: [ " << offset << " ... " << (offset + numberOfHashesPerKernelInvocation - 1) << " ]" << endl;
 
-        offset += 390625 * 256;
+        if (sleep_between_kernel_runs > 0)
+        {
+            // On some (older, slower) cards, this is necessary to ensure that the output is displayed.
+
+            usleep(1000 * sleep_between_kernel_runs);
+        }
+
+        offset += numberOfHashesPerKernelInvocation;
     }
-
-    cout << "# bye!" << endl;
 
     // Free memory
 
     cudaErr = cudaFree(prefix_dev);
     assert(cudaErr == cudaSuccess);
+
+    cout << "# bye!" << endl;
 
     return EXIT_SUCCESS;
 }
