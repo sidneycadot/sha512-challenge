@@ -9,6 +9,14 @@ email = "sidney@jigsaw.nl"
 
 import re, time, os
 
+def present_solution((idx, hstring, hvalue)):
+
+    frequency = 1.0 / (float(int(hvalue, 16)) / 2**512) / hashrate / 86400.0
+
+    hvalue = hvalue[:20] + " ..."
+
+    print "%5d \"%s\" %s    [1 / %6.3f days]" % (idx, hstring, hvalue, frequency)
+
 def present(solutions, malformed_lines):
 
     os.system("clear")
@@ -21,13 +29,9 @@ def present(solutions, malformed_lines):
 
     print
 
-    for (idx, hstring, hvalue) in solutions[:20]:
+    for solution in solutions[:20]:
 
-        frequency = 1.0 / (float(int(hvalue, 16)) / 2**512) / hashrate / 86400.0
-
-        hvalue = hvalue[:20] + " ..."
-
-        print "%5d \"%s\" %s    [1 / %6.3f days]" % (idx, hstring, hvalue, frequency)
+        present_solution(solution)
 
     if malformed_lines != 0:
         print
